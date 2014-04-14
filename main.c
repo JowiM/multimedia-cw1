@@ -1,7 +1,7 @@
 #include "interpolate.h"
 
 /* uncommenting this will print out a histogram of the values in the input data - only intended for debugging */
-/* #define PRINTHIST */
+#define PRINTHIST
 
 main(int argc, char **argv) {
   FILE *ifile;
