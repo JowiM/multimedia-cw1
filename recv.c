@@ -1,6 +1,28 @@
 #include "interpolate.h"
 #include "assert.h"
 
+
+void linearInterpolateBuffer(float* previousFrame, int numChannels, float* input, int inNumFrames, float* output, int outNumFrames)
+{
+  int i, j, index;
+  double distance, prevValue, nextValue;
+
+  for(i=0; i<outNumFrames; i++)
+    {
+      for(j=0; j<numChannels; j++)
+        {
+          distance = i * (inNumFrames / (double)outNumFrames);
+          index = ((int)distance) * numChannels + j;
+          nextValue = input[index];
+          prevValue = distance < 1 ? previousFrame[j] : input[index-numChannels];
+          distance -= (int)distance;
+          output[i*numChannels+j] = (nextValue-prevValue) * distance + prevValue;
+        }
+    }
+  for(j=0; j<numChannels; j++)
+    previousFrame[j] = input[(inNumFrames - 1) * numChannels + j];
+}
+
 /* write a packet's worth of silence */
 void write_silence(FILE *ofile, int num_samples) {
   short missing_pkt[num_samples];
@@ -38,36 +60,36 @@ void recv_packet(int seqno, int len, char *data, FILE *ofile, int strategy) {
     printf("s=%d\n", strategy);
     switch(strategy) {
       case SILENCE: {
-	         /* create a packet containing silence */
-	         missing_seqno = prev_seqno + 1;
-	         while (missing_seqno < seqno) {
-	           write_silence(ofile, num_samples);
-	           missing_seqno++;
-	         }
-	         break;
+           /* create a packet containing silence */
+           missing_seqno = prev_seqno + 1;
+           while (missing_seqno < seqno) {
+             write_silence(ofile, num_samples);
+             missing_seqno++;
+           }
+           break;
         }
       case REPEAT_PREV:{
           print_raw_packetbuf(prev_samples, num_samples);
           print_raw_packetbuf(prev_samples+(num_samples/2), num_samples/2);
           printf("FIX THIS!! - %02x - %02x - numb samples - %d \n", *prev_samples, *prev_samples+(num_samples/2), num_samples/2);
-	         /* repeat the previous packet */
+           /* repeat the previous packet */
           fwrite(prev_samples, 2, num_samples, ofile);
-        	missing_seqno = prev_seqno + 2;
+          missing_seqno = prev_seqno + 2;
           printf("seqno - %d prev_seqno - %d - missing_seqno - %d \n", seqno, prev_seqno, missing_seqno);
-        	while (missing_seqno < seqno) {
+          while (missing_seqno < seqno) {
             printf("loop!! \n");
-        	  /* repeating the same packet more than once sounds bad */
-        	  write_silence(ofile, num_samples);
-        	  missing_seqno++;
-        	}
-        	break;
+            /* repeating the same packet more than once sounds bad */
+            write_silence(ofile, num_samples);
+            missing_seqno++;
+          }
+          break;
         }
       case REPEAT_PREV_NEXT:{
-        	int pkt_distance = seqno - prev_seqno;
+          int pkt_distance = (seqno - prev_seqno)-1;
 
           //Just one packet lost
           //one packet loss
-          if(pkt_distance == 2){
+          if(pkt_distance == 1){
             printf("ONE PACKET LOSS \n");
             //Write half of previous
             fwrite(prev_samples+(num_samples/2), 2, num_samples/2, ofile);
@@ -78,14 +100,14 @@ void recv_packet(int seqno, int len, char *data, FILE *ofile, int strategy) {
           }
 
           //two packet loss
-          if(pkt_distance == 3){
+          if(pkt_distance == 2){
             printf("TWO PACKET LOSS \n");
             fwrite(prev_samples, 2, num_samples, ofile);
             fwrite(samples, 1, num_samples*2, ofile);
           }
 
           //more then 3 packet loss
-          if(pkt_distance >= 4){
+          if(pkt_distance >= 3){
             printf("THREE PACKET LOSS \n");
             fwrite(prev_samples, 2, num_samples, ofile);
             missing_seqno = prev_seqno + 2;
@@ -101,59 +123,72 @@ void recv_packet(int seqno, int len, char *data, FILE *ofile, int strategy) {
           break;
         }
       case INTERPOLATE:{
-        short *dct_sample;
-        int *dct_result, *result;
+        int *dct_result, *new_packet;
+        short *idct_result;
         int pkt_size = num_samples*2;
-        int pkt_distance = seqno - prev_seqno;
-        pkt_distance -= 1;
-        printf("PKT DISTANCE %d \n", pkt_distance);
-        int i = 0, j = 0, tmp = 0, sample_pos = 0, numb_interpolation = 0, t_packets = 0;
-        short* idct_val = 0;
+        int i, j, distance, tmp_distance, index, next_val, prev_val, numb_interpolation;
+        double difference;
 
-        result = malloc(pkt_size*sizeof(int));
-        dct_sample = malloc(pkt_size*sizeof(short));
-        memcpy(dct_sample, prev_samples, num_samples*sizeof(int));
-        memcpy((dct_sample+num_samples*sizeof(int)), samples, num_samples*sizeof(int));
+        distance = (seqno - prev_seqno) - 1;
+        printf("DISTANCE: %d \n", distance);
+        tmp_distance = distance;
+
+        new_packet = malloc(pkt_size*sizeof(int));
 
         dct_result = dct(prev_samples);
-        t_packets = pkt_size*numb_interpolation;
-        numb_interpolation = pkt_distance;
-        if(pkt_distance > 3){
+        numb_interpolation = distance;
+        if(distance > 3){
           numb_interpolation = 3;
         }
-        printf("INTERPOLATED PACKETS: %d \n", numb_interpolation);
+
+        index = 0;
         for(i = 0; i < numb_interpolation; i++){
-          printf("PKT - %d \n", i);
+          printf("Dis %d \n", i);
           for(j = 0; j < pkt_size; j++){
-            if(tmp == numb_interpolation){
-              tmp = 0;
-              sample_pos += 1;
-              printf("SAMPLE POS: %d - result: %d \n", sample_pos, dct_result[sample_pos]);
+            prev_val = dct_result[index];
+
+            //If 1 no calculations is done :) & copy correct packet
+            if(tmp_distance == numb_interpolation){
+              new_packet[j] = prev_val;
+            } else {
+              next_val = dct_result[index+1];
+              difference = 1.0/numb_interpolation;
+              if(difference > 200 || difference < -200){
+                new_packet[j] = prev_val;
+              } else {
+                new_packet[j] = (int)(((next_val - prev_val)*difference) + prev_val);
+              }
+              printf("SAVED: %d \n", new_packet[j]);
             }
-            result[j] = dct_result[sample_pos];
-            //(int)(dct_result[sample_pos]+((dct_result[sample_pos+1]-dct_result[sample_pos])/pkt_size)*(pkt_size - pkt_size-sample_pos));
-            printf("LEts see %d \n",result[j]);
-            tmp += 1;
+
+            tmp_distance -= 1;
+            if(tmp_distance < 1){
+              tmp_distance = numb_interpolation;
+              index += 1;
+            }
           }
-          idct_val = idct(dct_result);
-          fwrite(idct_val, 2, num_samples, ofile);
+
+          idct_result = idct(new_packet);
+          printf("WRITING \n");
+          fwrite(idct_result, 1, pkt_size, ofile);
+
           //clean memory
-          memset(result, 0, num_samples*sizeof(int));
+          memset(new_packet, 0, pkt_size);
+          free(idct_result);
         }
 
-        if(pkt_distance > 3){
-          printf("GREATER the 3 \n");
-          /*while(missing_seqno < seqno-1){
+        free(new_packet);
+        free(dct_result);
+
+        if(distance > 3){
+          tmp_distance = prev_seqno + distance;
+          while(tmp_distance < seqno-1){
               printf("Silence!! \n");
               write_silence(ofile, num_samples);
-              missing_seqno++;
-            }*/
+              tmp_distance++;
+          }
         }
-      
-        free(dct_sample);
-        free(result);
-        free(dct_result);
-      	break;
+        break;
       }
       default:
         abort();
